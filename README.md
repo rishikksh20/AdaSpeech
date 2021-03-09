@@ -2,13 +2,13 @@
 Unofficial Pytorch implementation of [AdaSpeech](https://arxiv.org/pdf/2103.00993.pdf).
 
 
-![](./assets/adaspeech.png)
+![](./assets/adaspeech.PNG)
 
 ## Note:
 * I am not considering multi-speaker use case, Iam much more focus only on single speaker.
 * I will use only `Utterance level encoder` and `Phoneme level encoder` not condition layer norm (which is the soul of AdaSpeech paper), it definelty restrict the adaptive nature of AdaSpeech but my focus is to improve FastSpeech 2 acoustic generalization rather than adaptation.
 
-![](./assets/acoustic_embed.png)
+![](./assets/acoustic_embed.PNG)
 
 ## Citations
 ```bibtex
