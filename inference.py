@@ -108,7 +108,7 @@ def process_paragraph(para):
     return text
 
 
-def synth(text, model, hp):
+def synth(text, model, hp, ref_mel):
     """Decode with E2E-TTS model."""
 
     print("TTS synthesis")
@@ -125,7 +125,7 @@ def synth(text, model, hp):
 
     with torch.no_grad():
         print("predicting")
-        outs = model.inference(text)  # model(text) for jit script
+        outs = model.inference(text, ref_mel = ref_mel)  # model(text) for jit script
         mel = outs
     return mel
 
@@ -140,6 +140,8 @@ def main(args):
 
     print("Text : ", args.text)
     print("Checkpoint : ", args.checkpoint_path)
+    ref_mel = np.load(args.ref_mel)
+    ref_mel = torch.from_numpy(ref_mel).T
     if os.path.exists(args.checkpoint_path):
         checkpoint = torch.load(args.checkpoint_path)
     else:
@@ -169,7 +171,7 @@ def main(args):
 
     for i in range(0, len(text)):
         txt = preprocess(text[i])
-        audio = synth(txt, model, hp)
+        audio = synth(txt, model, hp, ref_mel)
         m = audio.T
         para_mel.append(m)
 
@@ -228,6 +230,9 @@ def get_parser():
     # task related
     parser.add_argument(
         "--text", type=str, required=True, help="Filename of train label data (json)"
+    )
+    parser.add_argument(
+        "--ref_mel", type=str, required=True, help="Filename of Reference Mels"
     )
     parser.add_argument(
         "--pad", default=2, type=int, help="padd value at the end of each sentence"
