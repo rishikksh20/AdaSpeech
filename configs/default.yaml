@@ -105,6 +105,10 @@ model:
 
   attn_plot : False
 
+  ####### AdaSpeech
+  predictor_start_step: 60000
+  phn_latent_dim: 4
+
 
 train:
   # optimization related
