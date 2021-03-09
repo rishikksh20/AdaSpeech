@@ -63,6 +63,11 @@ class TTSDataset(Dataset):
         durations = durations[: len(x)]
         durations[-1] = durations[-1] + (mel.shape[1] - sum(durations))
         assert mel.shape[1] == sum(durations)
+
+        avg_mel = np.load(f"{self.path}avg_mel_ph/{id}.npy")
+        assert avg_mel.shape[0] == len(x)
+
+
         return (
             np.array(x),
             mel.T,
@@ -71,6 +76,7 @@ class TTSDataset(Dataset):
             np.array(durations),
             e,
             p,
+            avg_mel,
         )  # Mel [T, num_mel]
 
     def __len__(self):
@@ -107,6 +113,8 @@ def collate_tts(batch):
     energys = pad_list([torch.from_numpy(y[5]).float() for y in batch], 0)
     pitches = pad_list([torch.from_numpy(y[6]).float() for y in batch], 0)
 
+    avg_mel = pad_list([torch.from_numpy(y[7]).float() for y in batch], 0)
+
     # make labels for stop prediction
     labels = mels.new_zeros(mels.size(0), mels.size(1))
     for i, l in enumerate(olens):
@@ -115,7 +123,7 @@ def collate_tts(batch):
     # scale spectrograms to -4 <--> 4
     # mels = (mels * 8.) - 4
 
-    return inputs, ilens, mels, labels, olens, ids, durations, energys, pitches
+    return inputs, ilens, mels, labels, olens, ids, durations, energys, pitches, avg_mel
 
 
 class BinnedLengthSampler(Sampler):

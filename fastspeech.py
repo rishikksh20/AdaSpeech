@@ -23,7 +23,7 @@ from core.modules import initialize
 from core.modules import Postnet
 from typeguard import check_argument_types
 from typing import Dict, Tuple, Sequence
-
+from core.acoustic_encoder import UtteranceEncoder, PhonemeLevelEncoder, PhonemeLevelPredictor, AcousticPredictorLoss
 
 class FeedForwardTransformer(torch.nn.Module):
     """Feed Forward Transformer for TTS a.k.a. FastSpeech.
@@ -115,6 +115,19 @@ class FeedForwardTransformer(torch.nn.Module):
         # define length regulator
         self.length_regulator = LengthRegulator()
 
+        ###### AdaSpeech
+
+        self.utterance_encoder = UtteranceEncoder(idim=hp.audio.n_mels)
+
+
+        self.phoneme_level_encoder = PhonemeLevelEncoder(idim=hp.audio.n_mels)
+
+        self.phoneme_level_predictor = PhonemeLevelPredictor(idim=hp.model.adim)
+
+        self.phone_level_embed = torch.nn.Linear(hp.model.phn_latent_dim, hp.model.adim)
+
+        self.acoustic_criterion = AcousticPredictorLoss()
+
         # define decoder
         # NOTE: we use encoder as decoder because fastspeech's decoder is the same as encoder
         self.decoder = Encoder(
@@ -170,11 +183,14 @@ class FeedForwardTransformer(torch.nn.Module):
         self,
         xs: torch.Tensor,
         ilens: torch.Tensor,
+        ys: torch.Tensor = None,
         olens: torch.Tensor = None,
         ds: torch.Tensor = None,
         es: torch.Tensor = None,
         ps: torch.Tensor = None,
         is_inference: bool = False,
+        phn_level_predictor: bool = False,
+        avg_mel: torch.Tensor = None,
     ) -> Sequence[torch.Tensor]:
         # forward encoder
         x_masks = self._source_mask(
@@ -184,7 +200,32 @@ class FeedForwardTransformer(torch.nn.Module):
         hs, _ = self.encoder(
             xs, x_masks
         )  # (B, Tmax, adim) -> torch.Size([32, 121, 256])
-        # print("ys :", ys.shape)
+
+        ## AdaSpeech Specific ##
+
+        uttr = self.utterance_encoder(ys.transpose(1, 2)).transpose(1, 2)
+        hs = hs + uttr.repeat(1, hs.size(1), 1)
+
+        phn = None
+        ys_phn = None
+
+        if phn_level_predictor:
+            if is_inference:
+                ys_phn = self.phoneme_level_predictor(hs.transpose(1, 2))  # (B, Tmax, 4)
+                hs = hs + self.phone_level_embed(ys_phn)
+            else:
+                with torch.no_grad():
+                    ys_phn = self.phoneme_level_encoder(avg_mel.transpose(1, 2))  # (B, Tmax, 4)
+
+                phn = self.phoneme_level_predictor(hs.transpose(1, 2))  # (B, Tmax, 4)
+                hs = hs + self.phone_level_embed(ys_phn.detach())  # (B, Tmax, 256)
+
+        else:
+            ys_phn = self.phoneme_level_encoder(avg_mel.transpose(1, 2))  # (B, Tmax, 4)
+            hs = hs + self.phone_level_embed(ys_phn)  # (B, Tmax, 256)
+
+
+
 
         # forward duration predictor and length regulator
         d_masks = make_pad_mask(ilens).to(xs.device)
@@ -196,25 +237,25 @@ class FeedForwardTransformer(torch.nn.Module):
             one_hot_pitch = self.pitch_predictor.inference(hs)  # (B, Lmax, adim)
         else:
             with torch.no_grad():
-                # ds = self.duration_calculator(xs, ilens, ys, olens)  # (B, Tmax)
+
                 one_hot_energy = self.energy_predictor.to_one_hot(
                     es
                 )  # (B, Lmax, adim)   torch.Size([32, 868, 256])
-                # print("one_hot_energy:", one_hot_energy.shape)
+
                 one_hot_pitch = self.pitch_predictor.to_one_hot(
                     ps
                 )  # (B, Lmax, adim)   torch.Size([32, 868, 256])
-                # print("one_hot_pitch:", one_hot_pitch.shape)
+
             mel_masks = make_pad_mask(olens).to(xs.device)
-            # print("Before Hs:", hs.shape)  # torch.Size([32, 121, 256])
+
             d_outs = self.duration_predictor(hs, d_masks)  # (B, Tmax)
-            # print("d_outs:", d_outs.shape)      #  torch.Size([32, 121])
+
             hs = self.length_regulator(hs, ds, ilens)  # (B, Lmax, adim)
-            # print("After Hs:",hs.shape)  #torch.Size([32, 868, 256])
+
             e_outs = self.energy_predictor(hs, mel_masks)
-            # print("e_outs:", e_outs.shape)  #torch.Size([32, 868])
+
             p_outs = self.pitch_predictor(hs, mel_masks)
-            # print("p_outs:", p_outs.shape)   #torch.Size([32, 868])
+
         hs = hs + self.pitch_embed(one_hot_pitch)  # (B, Lmax, adim)
         hs = hs + self.energy_embed(one_hot_energy)  # (B, Lmax, adim)
         # forward decoder
@@ -240,7 +281,7 @@ class FeedForwardTransformer(torch.nn.Module):
         if is_inference:
             return before_outs, after_outs, d_outs, one_hot_energy, one_hot_pitch
         else:
-            return before_outs, after_outs, d_outs, e_outs, p_outs
+            return before_outs, after_outs, d_outs, e_outs, p_outs,  phn, ys_phn
 
     def forward(
         self,
@@ -251,6 +292,8 @@ class FeedForwardTransformer(torch.nn.Module):
         ds: torch.Tensor,
         es: torch.Tensor,
         ps: torch.Tensor,
+        avg_mel: torch.Tensor = None,
+        phn_level_predictor: bool = False
     ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         """Calculate forward propagation.
         Args:
@@ -267,15 +310,10 @@ class FeedForwardTransformer(torch.nn.Module):
         ys = ys[:, : max(olens)]  # torch.Size([32, 868, 80]) -> [B, Lmax, odim]
 
         # forward propagation
-        before_outs, after_outs, d_outs, e_outs, p_outs = self._forward(
-            xs, ilens, olens, ds, es, ps, is_inference=False
+        before_outs, after_outs, d_outs, e_outs, p_outs, phn, ys_phn = self._forward(
+            xs, ilens, olens, ds, es, ps, is_inference=False, avg_mel=avg_mel, phn_level_predictor=phn_level_predictor
         )
 
-        # modifiy mod part of groundtruth
-        # if hp.model.reduction_factor > 1:
-        #     olens = olens.new([olen - olen % self.reduction_factor for olen in olens])
-        #     max_olen = max(olens)
-        #     ys = ys[:, :max_olen]
 
         # apply mask to remove padded part
         if self.use_masking:
@@ -293,6 +331,14 @@ class FeedForwardTransformer(torch.nn.Module):
                 after_outs.masked_select(out_masks) if after_outs is not None else None
             )
             ys = ys.masked_select(out_masks)
+            if phn is not None and ys_phn is not None:
+                phn = phn.masked_select(in_masks.unsqueeze(-1))
+                ys_phn = ys_phn.masked_select(in_masks.unsqueeze(-1))
+
+        acoustic_loss = 0
+
+        if phn_level_predictor:
+            acoustic_loss = self.acoustic_criterion(ys_phn, phn)
 
         # calculate loss
         before_loss = self.criterion(before_outs, ys)
@@ -321,7 +367,7 @@ class FeedForwardTransformer(torch.nn.Module):
                 duration_loss.mul(duration_weights).masked_select(duration_masks).sum()
             )
 
-        loss = l1_loss + duration_loss + energy_loss + pitch_loss
+        loss = l1_loss + duration_loss + energy_loss + pitch_loss + acoustic_loss
         report_keys = [
             {"l1_loss": l1_loss.item()},
             {"before_loss": before_loss.item()},
@@ -329,6 +375,7 @@ class FeedForwardTransformer(torch.nn.Module):
             {"duration_loss": duration_loss.item()},
             {"energy_loss": energy_loss.item()},
             {"pitch_loss": pitch_loss.item()},
+            {"acostic_loss": acoustic_loss},
             {"loss": loss.item()},
         ]
 
@@ -336,7 +383,8 @@ class FeedForwardTransformer(torch.nn.Module):
 
         return loss, report_keys
 
-    def inference(self, x: torch.Tensor) -> torch.Tensor:
+    def inference(self, x: torch.Tensor, ref_mel: torch.Tensor = None, avg_mel: torch.Tensor = None
+                  , phn_level_predictor: bool = True) -> torch.Tensor:
         """Generate the sequence of features given the sequences of characters.
         Args:
             x (Tensor): Input sequence of characters (T,).
@@ -350,6 +398,18 @@ class FeedForwardTransformer(torch.nn.Module):
         # setup batch axis
         ilens = torch.tensor([x.shape[0]], dtype=torch.long, device=x.device)
         xs = x.unsqueeze(0)
+
+        if ref_mel is not None:
+            ref_mel = ref_mel.unsqueeze(0)
+        if avg_mel is not None:
+            avg_mel = avg_mel.unsqueeze(0)
+            # inference
+            before_outs, outs, d_outs, _ = self._forward(xs, ilens=ilens, ys=ref_mel, avg_mel=avg_mel,
+                                                         is_inference=True,
+                                                         phn_level_predictor=phn_level_predictor)  # (L, odim)
+        else:
+            before_outs, outs, d_outs, _ = self._forward(xs, ilens=ilens, ys=ref_mel, is_inference=True,
+                                                         phn_level_predictor=phn_level_predictor)  # (L, odim)
 
         # inference
         _, outs, _, _, _ = self._forward(xs, ilens, is_inference=True)  # (L, odim)

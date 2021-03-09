@@ -84,6 +84,7 @@ def train(args, hp, hp_str, logger, vocoder):
     writer = SummaryWriter(os.path.join(hp.train.log_dir, args.name))
     model.train()
     forward_count = 0
+    phn_level_predictor = False
     # print(model)
     for epoch in range(hp.train.epochs):
         start = time.time()
@@ -93,7 +94,9 @@ def train(args, hp, hp_str, logger, vocoder):
         pbar = tqdm.tqdm(dataloader, desc="Loading train data")
         for data in pbar:
             global_step += 1
-            x, input_length, y, _, out_length, _, dur, e, p = data
+            if hp.model.phoneme_acoustic_embed and global_step >= hp.model.predictor_start_step:
+                phn_level_predictor = True
+            x, input_length, y, _, out_length, _, dur, e, p, avg_mel = data
             # x : [batch , num_char], input_length : [batch], y : [batch, T_in, num_mel]
             #             # stop_token : [batch, T_in], out_length : [batch]
 
@@ -105,6 +108,8 @@ def train(args, hp, hp_str, logger, vocoder):
                 dur.cuda(),
                 e.cuda(),
                 p.cuda(),
+                avg_mel.cuda(),
+                phn_level_predictor
             )
             loss = loss.mean() / hp.train.accum_grad
             running_loss += loss.item()
@@ -148,7 +153,7 @@ def train(args, hp, hp_str, logger, vocoder):
             if step % hp.train.validation_step == 0:
 
                 for valid in validloader:
-                    x_, input_length_, y_, _, out_length_, ids_, dur_, e_, p_ = valid
+                    x_, input_length_, y_, _, out_length_, ids_, dur_, e_, p_, avg_mel_ = valid
                     model.eval()
                     with torch.no_grad():
                         loss_, report_dict_ = model(
@@ -159,9 +164,12 @@ def train(args, hp, hp_str, logger, vocoder):
                             dur_.cuda(),
                             e_.cuda(),
                             p_.cuda(),
+                            avg_mel_.cuda(),
+                            phn_level_predictor
                         )
 
-                        mels_ = model.inference(x_[-1].cuda())  # [T, num_mel]
+                        mels_ = model.inference(x_[-1].cuda(), ref_mel = y_[-1].cuda(), avg_mel = avg_mel_[-1].cuda(),
+                                                      phn_level_predictor = phn_level_predictor)  # [T, num_mel]
 
                     model.train()
                     for r in report_dict_:
