@@ -1,6 +1,6 @@
 # AdaSpeech: Adaptive Text to Speech for Custom Voice [WIP]
 Unofficial Pytorch implementation of [AdaSpeech](https://arxiv.org/pdf/2103.00993.pdf).
-# Citations
+
 
 ![](./assets/adaspeech.png)
 
@@ -10,6 +10,7 @@ Unofficial Pytorch implementation of [AdaSpeech](https://arxiv.org/pdf/2103.0099
 
 ![](./assets/acoustic_embed.png)
 
+## Citations
 ```bibtex
 @misc{chen2021adaspeech,
       title={AdaSpeech: Adaptive Text to Speech for Custom Voice}, 
