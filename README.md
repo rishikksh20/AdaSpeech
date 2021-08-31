@@ -66,3 +66,6 @@ e_max = Max energy
  python train_fastspeech.py --outdir etc -c configs/default.yaml -n "name"
 ```
 
+## Note
+* For more complete and end to end Voice cloning or Text to Speech (TTS) toolbox please visit [Deepsync Technologies](https://deepsync.co/).
+
